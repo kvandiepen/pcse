@@ -5,19 +5,22 @@
 Data providers for weather, soil, crop, timer and site data. Also
 a class for testing STU suitability for a given crop.
 
-Data providers are compatible with a CGMS 11 database schema.
+Data providers are compatible with a CGMS12 database schema.
 """
 
-import datetime
+import os
+import datetime as dt
+import logging
 
 from sqlalchemy import MetaData, select, Table, and_
-# from tabulate import tabulate
+from tabulate import tabulate
 import numpy as np
+import yaml
 
 from ...util import wind10to2, safe_float, check_date, reference_ET
 from ... import exceptions as exc
 from ...base_classes import WeatherDataContainer, WeatherDataProvider
-
+from ... import settings
 
 def fetch_crop_name(engine, crop_no):
     """Retrieves the name of the crop from the CROP table for
@@ -65,7 +68,7 @@ class STU_Suitability(set):
 
 
 class WeatherObsGridDataProvider(WeatherDataProvider):
-    """Retrieves meteodata from the WEATHER_OBS_GRID table in a CGMS11
+    """Retrieves meteodata from the WEATHER_OBS_GRID table in a CGMS12
     compatible database.
 
     :param engine: SqlAlchemy engine object providing DB access
@@ -76,7 +79,7 @@ class WeatherObsGridDataProvider(WeatherDataProvider):
         (datetime.date object)
     :param recalc_ET: Set to True to force calculation of reference
         ET values. Mostly useful when values have not been calculated
-         in the CGMS database.
+        in the CGMS database.
 
     Note that all meteodata is first retrieved from the DB and stored
     internally. Therefore, no DB connections are stored within the class
@@ -93,34 +96,59 @@ class WeatherObsGridDataProvider(WeatherDataProvider):
 
         WeatherDataProvider.__init__(self)
 
-        self.grid_no = grid_no
+        self.grid_no = int(grid_no)
         self.recalc_ET = recalc_ET
 
-        try:
-            self.start_date = self.check_keydate(start_date)
-        except KeyError:
-            self.start_date = None
+        if not self._self_load_cache(self.grid_no):
+            try:
+                self.start_date = self.check_keydate(start_date)
+            except KeyError:
+                self.start_date = None
 
-        try:
-            self.end_date = self.check_keydate(end_date)
-        except KeyError:
-            self.end_date = None
+            try:
+                self.end_date = self.check_keydate(end_date)
+            except KeyError:
+                self.end_date = None
 
-        try:
-            self.time_interval = (end_date - start_date).days + 1
-        except TypeError:
-            self.time_interval = None
+            try:
+                self.time_interval = (end_date - start_date).days + 1
+            except TypeError:
+                self.time_interval = None
 
-        metadata = MetaData(engine)
-        # Get location info (lat/lon/elevation)
-        self._fetch_location_from_db(metadata)
-        # Retrieved meteo data
-        self._fetch_weather_from_db(metadata)
+            metadata = MetaData(engine)
+            # Get location info (lat/lon/elevation)
+            self._fetch_location_from_db(metadata)
+            # Retrieved meteo data
+            self._fetch_weather_from_db(metadata)
 
-        # Provide a description that is shown when doing a print()
-        line1 = "Weather data retrieved from CGMS 11 db %s" % str(engine)[7:-1]
-        line2 = "for grid_no: %s" % self.grid_no
-        self.description = [line1, line2]
+            # Provide a description that is shown when doing a print()
+            line1 = "Weather data retrieved from CGMS12 db %s" % str(engine)[7:-1]
+            line2 = "for grid_no: %s" % self.grid_no
+            self.description = [line1, line2]
+
+        # Save cache file
+        fname = self._get_cache_filename(self.grid_no)
+        self._dump(fname)
+
+    def _get_cache_filename(self, grid_no):
+        fname = "%s_grid_%i.cache" % (self.__class__.__name__, grid_no)
+        cache_filename = os.path.join(settings.METEO_CACHE_DIR, fname)
+        return cache_filename
+
+    def _self_load_cache(self, grid_no):
+        """Checks if a cache file exists and tries to load it."""
+        cache_fname = self._get_cache_filename(grid_no)
+        if os.path.exists(cache_fname):
+            r = os.stat(cache_fname)
+            cache_file_date = dt.date.fromtimestamp(r.st_mtime)
+            age = (dt.date.today() - cache_file_date).days
+            if age < 1:
+                try:
+                    self._load(cache_fname)
+                    return True
+                except exc.PCSEError:
+                    pass
+        return False
 
     #---------------------------------------------------------------------------
     def _fetch_location_from_db(self, metadata):
@@ -149,13 +177,13 @@ class WeatherObsGridDataProvider(WeatherDataProvider):
 
     #---------------------------------------------------------------------------
     def _fetch_weather_from_db(self, metadata):
-        """Retrieves the meteo data from table "grid_weather".
+        """Retrieves the meteo data from table 'weather_obs_grid'
         """
 
         try:
             # if start_date/end_date are None, define a date in the far past/future
-            start_date = self.start_date if self.start_date is not None else datetime.date(1, 1, 1)
-            end_date = self.end_date if self.end_date is not None else datetime.date(9999, 1, 1)
+            start_date = self.start_date if self.start_date is not None else dt.date(1, 1, 1)
+            end_date = self.end_date if self.end_date is not None else dt.date(9999, 1, 1)
             table_db = Table("weather_obs_grid", metadata, autoload=True)
             r = select([table_db], and_(table_db.c.grid_no == self.grid_no,
                                         table_db.c.day >= start_date,
@@ -188,7 +216,7 @@ class WeatherObsGridDataProvider(WeatherDataProvider):
 
     #---------------------------------------------------------------------------
     def _make_WeatherDataContainer(self, row, t):
-        """Process record from grid_weather including unit conversion."""
+        """Process record from 'weather_obs_grid' including unit conversion."""
 
         t.update({"TMAX": float(row.temperature_max),
                   "TMIN": float(row.temperature_min),
@@ -215,40 +243,44 @@ class WeatherObsGridDataProvider(WeatherDataProvider):
         return wdc
 
 
-class TimerDataProvider(dict):
-    """Class for providing timerdata from the CROP_CALENDAR table in a CGMS11 database.
+class AgroManagementDataProvider(list):
+    """Class for providing agromanagement data from the CROP_CALENDAR table in a CGMS12 database.
 
     :param engine: SqlAlchemy engine object providing DB access
-    :param grid_no: Integer grid ID, maps to the GRID_NO column in the table
-    :param crop_no: Integer crop ID, maps to the CROP_NO column in the table
+    :param grid_no: Integer grid ID, maps to the grid_no column in the table
+    :param crop_no: Integer id of crop, maps to the crop_no column in the table
     :param campaign_year: Integer campaign year, maps to the YEAR column in the table.
-        The campaign year usually refers to the year of the harvest. Thus for crops
-        crossing calendar years, the start_date can be in the previous year.
+           The campaign year usually refers to the year of the harvest. Thus for crops
+           crossing calendar years, the start_date can be in the previous year.
+    :keyword campaign_start: Optional keyword that can be used to define the start of the
+           campaign. Note that by default the campaign_start_date is set equal to the
+           crop_start_date which means that the simulation starts when the crop starts.
+           This default behaviour can be changed using this keyword. It can have multiple meanings:
 
-    Note that there is a difficulty in the CGMS database for determining the START_DATE
-    of the system. The START_DATE can be determined by the column GIVEN_STARTDATE_WATBAL
-    in the INITIAL_SOIL_WATER table. However, for retrieving this value we also need
-    to have the soil number (STU_NO) which we do not have yet and which is not needed
-    for retrieving the crop calendar itself.
+               - if a date object is passed, the campaign is assumed to start on this date.
+               - if an int/float is passed, the campaign_start_date is calculated as the
+                 crop_start_date minus the number of days provided by campaign_start.
 
-    For the moment, we therefore do set the START_DATE equal to the CROP_START_DATA
-    in the TimerDataProvider and provide a method `set_START_DATE()` for resetting
-    it to another value.
+    For adjusting the campaign_start_Date, see also the `set_campaign_start_date(date)` method
+    to update the campaign_start_date on an existing AgroManagementDataProvider.
     """
+    agro_management_template = """
+          - {campaign_start_date}:
+                CropCalendar:
+                    crop_name: '{crop_name}'
+                    variety_name: '{variety_name}'
+                    crop_start_date: {crop_start_date}
+                    crop_start_type: {crop_start_type}
+                    crop_end_date: {crop_end_date}
+                    crop_end_type: {crop_end_type}
+                    max_duration: {max_duration}
+                TimedEvents: null
+                StateEvents: null
+          - {campaign_end_date}: null
+        """
 
-    # Note that the following entries must be available:
-    #    CAMPAIGNYEAR: year of the agricultural campaign (e.g. harvest year)
-    #      START_DATE: date of the start of the simulation
-    #        END_DATE: date last possible day of the simulation
-    # CROP_START_TYPE: "emergence" or "sowing"
-    # CROP_START_DATE: date of the start of the crop simulation
-    #   CROP_END_TYPE: "maturity" | "harvest" |"earliest"
-    #   CROP_END_DATE: date of the end of the crop simulation in case of CROP_END_TYPE == "harvest" | "earliest"
-    #    MAX_DURATION: maximum number of days of the crop simulation
-
-    def __init__(self, engine, grid_no, crop_no, campaign_year):
-        dict.__init__(self)
-
+    def __init__(self, engine, grid_no, crop_no, campaign_year, campaign_start=None):
+        list.__init__(self)
         self.grid_no = int(grid_no)
         self.crop_no = int(crop_no)
         self.campaign_year = int(campaign_year)
@@ -267,60 +299,105 @@ class TimerDataProvider(dict):
             msg = "Failed deriving crop calendar for grid_no %s, crop_no %s " % (grid_no, crop_no)
             raise exc.PCSEError(msg)
 
-        # Get the campaign year
-        self["CAMPAIGNYEAR"] = row.year
-
-        # Determine the start type. Only sowing|emergence is accepted by PCSE/WOFOST
-        start_type = str(row.start_type).strip()
-        if start_type == "FIXED_SOWING":
-            self["CROP_START_TYPE"] = "sowing"
-        elif start_type == "FIXED_EMERGENCE":
-            self["CROP_START_TYPE"] = "emergence"
+        # Determine the start date/type. Only sowing|emergence is accepted by PCSE/WOFOST
+        cgms12_start_type = str(row.start_type).strip()
+        self.crop_start_date = check_date(row.start_date)
+        if cgms12_start_type == "FIXED_SOWING":
+            self.crop_start_type = "sowing"
+        elif cgms12_start_type == "FIXED_EMERGENCE":
+            self.crop_start_type = "emergence"
         else:
             msg = "Unsupported START_TYPE in CROP_CALENDAR table: %s" % row.start_type
             raise exc.PCSEError(msg)
 
-        # Start date for the crop, we force a datetime.date value
-        self["CROP_START_DATE"] = check_date(row.start_date)
-        # Set the system START_DATE equal to the CROP_START_DATE
-        self["START_DATE"] = self["CROP_START_DATE"]
-
-        # set END_TYPE and CROP_END_DATE (if applicable) for the crop: maturity|harvest|earliest
-        crop_end_type = str(row.end_type).strip().lower()
-        if crop_end_type == "maturity":
-            self["CROP_END_TYPE"] = crop_end_type
-            self["CROP_END_DATE"] = None
-        elif crop_end_type in ["harvest", "earliest"]:
-            self["CROP_END_TYPE"] = crop_end_type
-            self["CROP_END_DATE"] = check_date(row.end_date)
+        # determine the campaign_start_date
+        if campaign_start is None:
+            self.campaign_start_date = self.crop_start_date
+        elif isinstance(campaign_start, (int, float)):
+            ndays = abs(int(campaign_start))
+            self.campaign_start_date = self.crop_start_date - dt.timedelta(days=ndays)
         else:
+            try:
+                campaign_start = check_date(campaign_start)
+                if campaign_start <= self.crop_start_date:
+                    self.campaign_start_date = campaign_start
+                else:
+                    msg = "Date (%s) specified by keyword 'campaign_start' in call to AgroManagementDataProvider " \
+                          "is later then crop_start_date defined in the CGMS database."
+                    raise exc.PCSEError(msg % campaign_start)
+            except KeyError as e:
+                msg = "Value (%s) of keyword 'campaign_start' not recognized in call to AgroManagementDataProvider."
+                raise exc.PCSEError(msg % campaign_start)
+
+        # Determine crop end date/type and the end of the campaign
+        self.crop_end_type = str(row.end_type).strip().lower()
+        if self.crop_end_type not in ["harvest", "earliest", "maturity"]:
             msg = ("Unrecognized option for END_TYPE in table "
-                   "CROP_CALENDAR: %s" % crop_end_type)
+                   "CROP_CALENDAR: %s" % row.end_type)
             raise exc.PCSEError(msg)
 
-        # Maximum duration of crop cycle
-        self["MAX_DURATION"] = int(row.max_duration)
-        # simulation end date equals CROP_START_DATE + MAX_DURATION
-        self["END_DATE"] = self["CROP_START_DATE"] + datetime.timedelta(days=row.max_duration)
+        # Determine maximum duration of the crop
 
-    def set_START_DATE(self, start_date):
-        """Updates the value for START_DATE in TimerDataProvider
+        if self.crop_end_type == "maturity":
+            self.crop_end_date = "null"
+            self.max_duration = int(row.max_duration)
+            self.campaign_end_date = self.crop_start_date + dt.timedelta(days=self.max_duration)
+        else:
+            self.crop_end_date = check_date(row.end_date)
+            self.campaign_end_date = self.crop_end_date
+            self.max_duration = (self.crop_end_date - self.crop_start_date).days + 1
+
+        input = self._build_yaml_agromanagement()
+        self._parse_yaml(input)
+
+    def _build_yaml_agromanagement(self):
+        """Builds the YAML agromanagent string"""
+        # We do not get a variety_name from the CGMS database, so we make one
+        # as <crop_name>_<grid>_<year>
+        variety_name = "%s_%s_%s" % (self.crop_name, self.grid_no, self.campaign_year)
+        input = self.agro_management_template.format(campaign_start_date=self.campaign_start_date,
+                                                     crop_name=self.crop_name,
+                                                     variety_name=variety_name,
+                                                     crop_start_date=self.crop_start_date,
+                                                     crop_start_type=self.crop_start_type,
+                                                     crop_end_date=self.crop_end_date,
+                                                     crop_end_type=self.crop_end_type,
+                                                     max_duration=self.max_duration,
+                                                     campaign_end_date=self.campaign_end_date
+                                                     )
+        return input
+
+    def _parse_yaml(self, input):
+        """Parses the input YAML string and assigns to self"""
+        try:
+            items = yaml.load(input)
+        except yaml.YAMLError as e:
+            msg = "Failed parsing agromanagement string %s: %s" % (input, e)
+            raise exc.PCSEError(msg)
+        del self[:]
+        self.extend(items)
+
+    def set_campaign_start_date(self, start_date):
+        """Updates the value for the campaign_start_date.
+
+        This is useful only when the INITIAL_SOIL_WATER table in CGMS12 defines a different
+        campaign_start
         """
-        self["START_DATE"] = check_date(start_date)
+        self.campaign_start_date = check_date(start_date)
+        input = self._build_yaml_agromanagement()
+        self._parse_yaml(input)
 
     def __str__(self):
-        msg = ("Timer data for crop_no=%i (%s) derived from: %s\n" %
+        msg1 = ("Agromanagement data for crop_no=%i (%s) derived from: %s" %
                (self.crop_no, self.crop_name, self.db_resource))
-        t = "  %s: %s\n"
-        for k in sorted(self.keys()):
-            msg += t % (k, self[k])
-
+        msg2 = self._build_yaml_agromanagement()
+        msg = "  %s:\n %s" % (msg1, msg2)
         return msg
 
 
 class SoilDataProviderSingleLayer(dict):
-    """Class for providing soil data from the ROOING_DEPTH AND
-    SOIL_PHYSICAL_GROUP tableS in a CGMS11 database. This
+    """Class for providing soil data from the ROOTING_DEPTH AND
+    SOIL_PHYSICAL_GROUP tableS in a CGMS8/12 database. This
     applies to the single layered soil only.
 
     :param engine: SqlAlchemy engine object providing DB access
@@ -424,21 +501,25 @@ class SoilDataIterator(list):
     Instances of this class behave like a list, allowing to iterate
     over the soils in a CGMS grid. An example::
 
-    >>> soil_iterator = SoilDataIterator(engine, grid_no=15060)
-    >>> print(soildata)
-    Soil data for grid_no=15060 derived from oracle+cx_oracle://cgms12eu:***@eurdas.world
-      smu_no=9050131, area=625000000, stu_no=9000282 covering 50% of smu.
-        Soil parameters {'SMLIM': 0.312, 'SMFCF': 0.312, 'SMW': 0.152, 'CRAIRC': 0.06,
-                         'KSUB': 10.0, 'RDMSOL': 10.0, 'K0': 10.0, 'SOPE': 10.0, 'SM0': 0.439}
-      smu_no=9050131, area=625000000, stu_no=9000283 covering 50% of smu.
-        Soil parameters {'SMLIM': 0.28325, 'SMFCF': 0.28325, 'SMW': 0.12325, 'CRAIRC': 0.06,
-                         'KSUB': 10.0, 'RDMSOL': 40.0, 'K0': 10.0, 'SOPE': 10.0, 'SM0': 0.42075}
-    >>> for smu_no, area, stu_no, percentage, soil_par in soildata:
-    ...     print(smu_no, area, stu_no, percentage)
-    ...
-    (9050131, 625000000, 9000282, 50)
-    (9050131, 625000000, 9000283, 50)
+        >>> soil_iterator = SoilDataIterator(engine, grid_no=15060)
+        >>> print(soildata)
+        Soil data for grid_no=15060 derived from oracle+cx_oracle://cgms12eu:***@eurdas.world
+          smu_no=9050131, area=625000000, stu_no=9000282 covering 50% of smu.
+            Soil parameters {'SMLIM': 0.312, 'SMFCF': 0.312, 'SMW': 0.152, 'CRAIRC': 0.06,
+                             'KSUB': 10.0, 'RDMSOL': 10.0, 'K0': 10.0, 'SOPE': 10.0, 'SM0': 0.439}
+          smu_no=9050131, area=625000000, stu_no=9000283 covering 50% of smu.
+            Soil parameters {'SMLIM': 0.28325, 'SMFCF': 0.28325, 'SMW': 0.12325, 'CRAIRC': 0.06,
+                             'KSUB': 10.0, 'RDMSOL': 40.0, 'K0': 10.0, 'SOPE': 10.0, 'SM0': 0.42075}
+        >>> for smu_no, area, stu_no, percentage, soil_par in soildata:
+        ...     print(smu_no, area, stu_no, percentage)
+        ...
+        (9050131, 625000000, 9000282, 50)
+        (9050131, 625000000, 9000283, 50)
+
     """
+
+    # name of the table with Elementary Mapping Units
+    emu_table_name = "emu"
 
     def __init__(self, engine, grid_no):
 
@@ -458,13 +539,13 @@ class SoilDataIterator(list):
         """Retrieves the relevant SMU for given grid_no from
         table EMU.
         """
-        table_emu = Table("emu", metadata, autoload=True)
+        table_emu = Table(self.emu_table_name, metadata, autoload=True)
         r = select([table_emu.c.smu_no, table_emu.c.area],
                    table_emu.c.grid_no == grid_no).execute()
         rows = r.fetchall()
         if rows is None:
             msg = ("No soil mapping units (SMU) found for grid_no=%i "
-                   "in table EMU" % grid_no)
+                   "in table %s" % (grid_no, self.emu_table_name))
             raise exc.PCSEError(msg)
 
         return rows
@@ -689,6 +770,10 @@ class SiteDataProvider(dict):
     Note that the parameter SSI (Initial surface storage) is
     set to zero
 
+    Moreover, the start date of the water balance is defined by the
+    column GIVEN_STARTDATE_WATBAL. This value can be accessed as
+    an attribute `start_date_waterbalance`.
+
     """
 
     def __init__(self, engine, grid_no, crop_no, campaign_year, stu_no):
@@ -724,12 +809,15 @@ class SiteDataProvider(dict):
                    % (self.grid_no, self.crop_no, self.campaign_year, self.stu_no))
             raise exc.PCSEError(msg)
 
+        # Start date water balance
+        self.start_date_waterbalance = check_date(row.given_startdate_watbal)
+
         # Derived global parameters from table SITE
         table_site = Table('site', metadata, autoload=True)
         r = select([table_site]).execute()
         row = r.fetchone()
         self["IFUNRN"] = int(row.ifunrn)
-        self["NOTINF"] = int(row.notinf)
+        self["NOTINF"] = float(row.notinf)
         self["SSMAX"] = float(row.max_surface_storage)
         self["SSI"] = 0.
 

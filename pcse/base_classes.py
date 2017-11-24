@@ -10,7 +10,7 @@ import types
 import logging
 from datetime import date
 import cPickle
-from collections import Counter
+from collections import Counter, MutableMapping
 
 from .traitlets import (HasTraits, Any, Float, Int, Instance, Dict, Bool,
                         Enum, AfgenTrait)
@@ -19,6 +19,7 @@ from .util import Afgen
 from . import exceptions as exc
 from .decorators import prepare_states
 from .settings import settings
+
 
 class VariableKiosk(dict):
     """VariableKiosk for registering and publishing state variables in PCSE.
@@ -1072,9 +1073,9 @@ class WeatherDataContainer(SlotPickleMixin):
               "TMAX": (-50., 60.),
               "VAP": (0.06, 199.3),  # hPa, computed as sat. vapour pressure at -50, 60 Celsius
               "RAIN": (0, 25),
-              "E0": (0., 2.),
-              "ES0": (0., 2.),
-              "ET0": (0., 2.),
+              "E0": (0., 2.5),
+              "ES0": (0., 2.5),
+              "ET0": (0., 2.5),
               "WIND": (0., 100.),
               "SNOWDEPTH": (0., 250.),
               "TEMP": (-50., 60.),
@@ -1130,11 +1131,14 @@ class WeatherDataContainer(SlotPickleMixin):
 
     def __setattr__(self, key, value):
         # Override to allow range checking on known meteo variables.
-        if key in self.ranges:
-            vmin, vmax = self.ranges[key]
-            if not vmin <= value <= vmax:
-                msg = "Value (%s) for meteo variable '%s' outside allowed range (%s, %s)." % (value, key, vmin, vmax)
-                raise exc.PCSEError(msg)
+
+        # Skip range checking if disabled by user
+        if settings.METEO_RANGE_CHECKS:
+            if key in self.ranges:
+                vmin, vmax = self.ranges[key]
+                if not vmin <= value <= vmax:
+                    msg = "Value (%s) for meteo variable '%s' outside allowed range (%s, %s)." % (value, key, vmin, vmax)
+                    raise exc.PCSEError(msg)
         SlotPickleMixin.__setattr__(self, key, value)
 
     def __str__(self):
@@ -1193,7 +1197,7 @@ class WeatherDataProvider(object):
     longitude = None
     latitude = None
     elevation = None
-    description = None
+    description = []
     _first_date = None
     _last_date = None
     angstA = None
@@ -1203,7 +1207,6 @@ class WeatherDataProvider(object):
 
     def __init__(self):
         self.store = {}
-
         # Define a logger
         loggername = "%s.%s" % (self.__class__.__module__,
                                 self.__class__.__name__)
@@ -1235,6 +1238,24 @@ class WeatherDataProvider(object):
             raise exc.PCSEError(msg)
 
         self.store.update(store)
+
+    def export(self):
+        """Exports the contents of the WeatherDataProvider as a list of dictionaries.
+
+        The results from export can be directly converted to a Pandas dataframe
+        which is convenient for plotting or analyses.
+        """
+        if self.supports_ensembles:
+            # We have to include the member_id in each dict with weather data
+            pass
+        else:
+            weather_data = []
+            days = sorted([r[0] for r in self.store.keys()])
+            for day in days:
+                wdc = self(day)
+                r = {key: getattr(wdc, key) for key in wdc.__slots__ if hasattr(wdc, key)}
+                weather_data.append(r)
+        return weather_data
 
     @property
     def first_date(self):
@@ -1317,17 +1338,19 @@ class WeatherDataProvider(object):
         keydate = self.check_keydate(day)
         
         if self.supports_ensembles is False:
-            msg = "Retrieving weather data for day %s" % keydate
-            self.logger.debug(msg)
+            if self.logger is not None:
+                msg = "Retrieving weather data for day %s" % keydate
+                self.logger.debug(msg)
             try:
                 return self.store[(keydate, 0)]
-            except KeyError, e:
+            except KeyError as e:
                 msg = "No weather data for %s." % keydate
                 raise exc.WeatherDataProviderError(msg)
         else:
-            msg = "Retrieving ensemble weather data for day %s member %i" % \
-                  (keydate, member_id)
-            self.logger.debug(msg)
+            if self.logger is not None:
+                msg = "Retrieving ensemble weather data for day %s member %i" % \
+                      (keydate, member_id)
+                self.logger.debug(msg)
             try:
                 return self.store[(keydate, member_id)]
             except KeyError:
@@ -1455,18 +1478,20 @@ class BaseEngine(HasTraits, DispatcherObject):
                 simobj.zerofy()
 
 
-class ParameterProvider(HasTraits):
-    """Simple class providing a dictionary-like single interface for parameter values.
+class ParameterProvider(MutableMapping):
+    """Class providing a dictionary-like interface over all parameter sets (crop, soil, site).
+    It acts very much like a ChainMap with some additional features.
 
-    The idea behind this class is twofold. First of all by encapsulating the four
-    different parameter types (e.g. sitedata, timerdata, etc) into a single object,
+    The idea behind this class is threefold. First of all by encapsulating the
+    different parameter sets (sitedata, cropdata, soildata) into a single object,
     the signature of the `initialize()` method of each `SimulationObject` can be
     harmonized across all SimulationObjects. Second, the ParameterProvider itself
     can be easily adapted when different sets of parameter values are needed. For
-    example when running PCSE with crop rotations, different sets of timerdata and
-    cropdata are needed, this can now be handled easily by enhancing
-    ParameterProvider to rotate new sets of timerdata and cropdata on a CROP_FINISH
-    signal.
+    example when running PCSE with crop rotations, different sets of cropdata
+    are needed, this can now be handled easily by enhancing
+    ParameterProvider to rotate a new set of cropdata when the engine receives a
+    CROP_START signal. Finally, specific parameter values can be easily changed
+    by setting an `override` on that parameter.
 
     See also the `MultiCropParameterProvider`
     """
@@ -1475,46 +1500,155 @@ class ParameterProvider(HasTraits):
     _soildata = dict()
     _cropdata = dict()
     _timerdata = dict()
+    _override = dict()
+    _unique_parameters = list()
+    _iter = 0  # Counter for iterator
+    _ncrops_activated = 0  # Counts the number of times `set_crop_type()` has been called.
 
-    def __init__(self, sitedata={}, timerdata={}, soildata={}, cropdata={}):
-        self._sitedata = sitedata
-        self._timerdata = timerdata
-        self._soildata = soildata
-        self._cropdata = cropdata
-        self._maps = [self._sitedata, self._timerdata, self._soildata, self._cropdata]
+    def __init__(self, sitedata=None, timerdata=None, soildata=None, cropdata=None):
+        if sitedata is not None:
+            self._sitedata = sitedata
+        else:
+            self._sitedata = {}
+        if cropdata is not None:
+            self._cropdata = cropdata
+        else:
+            self._cropdata = {}
+        if soildata is not None:
+            self._soildata = soildata
+        else:
+            self._soildata = {}
+        if timerdata is not None:
+            self._timerdata = timerdata
+        else:
+            self._timerdata = {}
+        self._override = {}
+        self._maps = [self._override, self._sitedata, self._timerdata, self._soildata, self._cropdata]
         self._test_uniqueness()
 
-    def set_crop_type(self, crop_id=None, crop_start_type=None, crop_end_type=None):
-        """Set the start_type and end type of the crop which is relevant for
-        the phenology module.
+    def set_active_crop(self, crop_name=None, variety_name=None, crop_start_type=None, crop_end_type=None):
+        """Activate the crop parameters for the given crop_name and variety_name.
 
-        :param crop_id: string identifying the crop type, is ignored as only
+        :param crop_name: string identifying the crop name, is ignored as only
+               one crop is assumed to be here.
+        :param variety_name: string identifying the variety name, is ignored as only
                one crop is assumed to be here.
         :param crop_start_type: start type for the given crop: 'sowing'|'emergence'
         :param crop_end_type: end type for the given crop: 'maturity'|'harvest'|'earliest'
+
+        In case of crop rotations, there is a new set of crop parameters needed when a new
+        crop is started. This routine activates the crop parameters for the given crop_name and
+        variety_name. The `crop_name`, `variety_name` `crop_start_type` and `crop_end_type`
+        are defined in the agromanagement and supported by the AgroManager.
+
+        Note that many CropDataProviders are not designed for crop rotations and only support a single
+        crop whose parameters are active by default. In this case a call to `set_active_crop()` has no
+        effect and the `crop_name` and `variety_name` parameters are ignored.
+        CropDataProviders that support crop rotations explicitly have to subclass from
+        `pcse.base_classes.MultiCropDataProvider` in order to be recognized.
+
+        Besides the crop parameters, this method also sets the `crop_start_type` and `crop_end_type` of the
+        crop which is required for all crops by the phenology module.
+
         """
 
         self._timerdata["CROP_START_TYPE"] = crop_start_type
         self._timerdata["CROP_END_TYPE"] = crop_end_type
+        if isinstance(self._cropdata, MultiCropDataProvider):
+            # we have a MultiCropDataProvider, so set the active crop and variety
+            self._cropdata.set_active_crop(crop_name, variety_name)
+        else:
+            # we do not have a MultiCropDataProvider, this means that crop rotations are not supported
+            # At the first call this is OK. However issue a warning with subsequent calls
+            # to set_crop_type() are done because we cannot change the set of crop parameters
+            if self._ncrops_activated == 0:
+                pass
+            else:
+                # has been called multiple times
+                msg = "A second crop was scheduled: however, the CropDataProvider does not " \
+                      "support multiple crop parameter sets. This will only work for crop" \
+                      "rotations with the same crop."
+                loggername = "%s.%s" % (self.__class__.__module__,
+                                        self.__class__.__name__)
+                logger = logging.getLogger(loggername)
+                logger.warning(msg)
+
+        self._ncrops_activated += 1
         self._test_uniqueness()
 
+    def set_override(self, varname, value, check=True):
+        """"Override the value of parameter varname in the parameterprovider.
+
+        Overriding the value of particular parameter is often useful for example
+        when running for different sets of parameters or for calibration
+        purposes.
+
+        Note that if check=True (default) varname should already exist in one of site, timer,
+        soil or cropdata.
+        """
+
+        if check:
+            if varname in self:
+                self._override[varname] = value
+            else:
+                msg = "Cannot override '%s', parameter does not exist." % varname
+                raise exc.PCSEError(msg)
+        else:
+            self._override[varname] = value
+
+    def clear_override(self, varname=None):
+        """Removes parameter varname from the set of overridden parameters.
+
+        Without arguments all overridden parameters are removed.
+        """
+
+        if varname is None:
+            self._override.clear()
+        else:
+            if varname in self._override:
+                self._override.pop(varname)
+            else:
+                msg = "Cannot clear varname '%s' from override" % varname
+                raise exc.PCSEError(msg)
+
     def _test_uniqueness(self):
-        # Check if parameter names are unique
+        """Check if parameter names are unique and raise an error if duplicates occur.
+
+        Note that the uniqueness is not tested for parameters in self._override as this
+        is specifically meant for overriding parameters.
+        """
         parnames = []
-        for mapping in self._maps:
+        for mapping in [self._sitedata, self._timerdata, self._soildata, self._cropdata]:
             parnames.extend(mapping.keys())
         unique = Counter(parnames)
         for parname, count in unique.items():
             if count > 1:
                 msg = "Duplicate parameter found: %s" % parname
-                raise RuntimeError(msg)
+                raise exc.PCSEError(msg)
+
+    @property
+    def _unique_parameters(self):
+        """Returns a list of unique parameter names across all sets of parameters.
+
+        This includes the parameters in self._override in order to be able to
+        iterate over all parameters in the ParameterProvider.
+        """
+        s = []
+        for mapping in self._maps:
+            s.extend(mapping.keys())
+        return sorted(list(set(s)))
 
     def __getitem__(self, key):
+        """Returns the value of the given parameter (key).
+
+        Note that the search order in self._map is such that self._override is tested first for the
+        existence of the key. Thus ensuring that overridden parameters will be found first.
+
+        :param key: parameter name to return
+        """
         for mapping in self._maps:
-            try:
+            if key in mapping:
                 return mapping[key]
-            except KeyError:
-                pass
         raise KeyError(key)
 
     def __contains__(self, key):
@@ -1523,84 +1657,71 @@ class ParameterProvider(HasTraits):
                 return True
         return False
 
-class MultiCropParameterProvider(ParameterProvider):
-    """Parameter provider that allows multiple crop
-    parameter sets to be specified. This ParameterProvider is
-    designed to be combined with the AgroManager in order to
-    facilitate crop rotations.
+    def __str__(self):
+        msg = "ParameterProvider providing %i parameters, %i parameters overridden: %s."
+        return msg % (len(self), len(self._override), self._override.keys())
 
-    Note that timerdata does not have to be provided anymore
-    because this role has been taken over by the AgroManager.
+    def __setitem__(self, key, value):
+        """Override an existing parameter (key) by value.
 
-    :param sitedata: A dictionary with site parameters
-    :param soildata: A dictionary with soil parameters
-    :param multi_cropdata: A dict of dicts with the crop parameters
-        keyed on the `crop_id` used in the crop calendar. For
-        example:  multi_cropdata = {'winter-wheat': {<parameters for winter-wheat>},
-                                    'maize': {<parameters for maize>},
-                                    etc...
-    :keyword max_root_depth_name: The name of the crop parameter specifying the
-        maximum crop rooting depth. Defaults to "RDMCR"
-    :keyword init_root_depth_name: The name of the crop parameter specifying the
-        initial crop rooting depth. Defaults to "RDI".
+         The parameter that is overridden is added to self._override, note that only *existing*
+         parameters may be overridden this way. If it is needed to really add a *new* parameter
+         than use: ParameterProvider.set_override(key, value, check=False)
 
-    warning:: The WOFOST ClassicWaterBalance needs to know the maximum rooting depth
-    of all crops (RDMCR) in order to define its soil layers. Therefore all
-    sets of crop parameters are searched for the maximum value of RDMCR. Moreover, the
-    initial rooting depth (RDI) needs to be the same across all crop types. The names
-    of these parameter can be provided through the keywords specified above but default
-    to 'RDMCR' and 'RDI'.
-    """
-    _multi_cropdata = dict()
-    _RDMCR_max = 0.  # maximum rooting depth across all crop types for the water balance
-    _RDI = 0.   # Initial rooting depth
-
-    def __init__(self, sitedata, soildata, multi_cropdata, max_root_depth_name="RDMCR",
-                 init_root_depth_name="RDI"):
-
-        self._sitedata = sitedata
-        self._soildata = soildata
-        self._cropdata = {}
-        self._timerdata = {}
-        self._multi_cropdata = multi_cropdata
-
-        # Get maximum rooting depth and initial rooting depth over all crops
-        RDI = []
-        for crop_id, cropdata in self._multi_cropdata.items():
-            if cropdata[max_root_depth_name] > self._RDMCR_max:
-                self._RDMCR_max = cropdata[max_root_depth_name]
-            RDI.append(cropdata[init_root_depth_name])
-
-        # Test if all crops have the same initial rooting depth
-        if len(set(RDI)) > 1:
-            msg = "Initial rooting depth (%s) not the same across all crop types." % init_root_depth_name
-            raise exc.PCSEError(msg)
-        self._RDI = RDI[0]
-
-        # update the cropdata to provide default values for RDI and RDMCR which
-        # are need by the waterbalance at the initialization.
-        self._cropdata[max_root_depth_name] = self._RDMCR_max
-        self._cropdata[init_root_depth_name] = self._RDI
-
-        self._maps = [self._sitedata, self._timerdata, self._soildata, self._cropdata]
-        self._test_uniqueness()
-
-    def set_crop_type(self, crop_id=None, crop_start_type=None, crop_end_type=None):
-        """Switch the crop parameters in the MultiCropParameterProvider to crop type given by crop_id.
-
-        :param crop_id: string identifying the crop type
-        :param crop_start_type: start type for the given crop: 'sowing'|'emergence'
-        :param crop_end_type: end type for the given crop: 'maturity'|'harvest'|'earliest'
+        :param key: The name of the parameter to override
+        :param value: the value of the parameter
         """
-
-        if crop_id not in self._multi_cropdata:
-            msg = "Crop parameters for crop (%s) cannot be found in the multi_cropdata." % crop_id
+        if key in self:
+            self._override[key] = value
+        else:
+            msg = ("Cannot override parameter '%s', parameter does not exist. "
+                  "to bypass this check use: set_override(parameter, value, check=False)") % key
             raise exc.PCSEError(msg)
 
-        self._cropdata.clear()
-        self._cropdata.update(self._multi_cropdata[crop_id])
-        self._timerdata["CROP_START_TYPE"] = crop_start_type
-        self._timerdata["CROP_END_TYPE"] = crop_end_type
+    def __delitem__(self, key):
+        """Deletes a parameter from self._override.
 
-        self._maps = [self._sitedata, self._timerdata, self._soildata, self._cropdata]
-        self._test_uniqueness()
+        Note that only parameters that exist in self._override can be deleted. This also means that
+        if an parameter is overridden its original value will return after a parameter is deleted.
+
+        :param key: The name of the parameter to delete
+        """
+        if key in self._override:
+            self._override.pop(key)
+        elif key in self:
+            msg = "Cannot delete default parameter: %s" % key
+            raise exc.PCSEError(msg)
+        else:
+            msg = "Parameter not found!"
+            raise KeyError(msg)
+
+    def __len__(self):
+        return len(self._unique_parameters)
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        i = self._iter
+        if i < len(self):
+            self._iter += 1
+            return self._unique_parameters[self._iter-1]
+        else:
+            self._iter = 0
+            raise StopIteration
+
+
+class MultiCropDataProvider(dict):
+
+        def __init__(self):
+            self._store = {}
+
+        def set_active_crop(self, crop_name, variety_name):
+            """Sets the crop parameters for the crop identified by crop_name and variety_name.
+
+            Needs to be implemented by each subclass of MultiCropDataProvider
+            """
+            msg = "'set_crop_type' method should be implemented specifically for each" \
+                  "subclass of MultiCropDataProvider."
+            raise NotImplementedError(msg)
+

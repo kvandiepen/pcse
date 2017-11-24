@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2004-2014 Alterra, Wageningen-UR
-# Allard de Wit (allard.dewit@wur.nl), April 2014
+# Copyright (c) 2004-2016 Alterra, Wageningen-UR
+# Allard de Wit (allard.dewit@wur.nl), December 2016
 """
-Copyright (c) 2004-2014 Alterra, Wageningen-UR
-
 The Python Crop Simulation Environment (PCSE) has been developed
 to facilitate implementing crop simulation models that were 
 developed in Wageningen. PCSE provides a set of building blocks
@@ -18,22 +16,24 @@ and state integration and the initialization of parameters
 in a PCSE model. Moreover PCSE provides support for reusing
 input files and weather files that are used by FST models.
 
-PCSE currently provides an implementation of the WOFOST crop 
-simulation model and variants of WOFOST with extended
+PCSE currently provides an implementation of the WOFOST and LINTUL crop
+simulation models and variants of WOFOST with extended
 capabilities.
 
 See Also
 --------
 * http://www.wageningenur.nl/wofost
-* http://wofost.wikispaces.com
+* http://github.com/ajwdewit/pcse
+* http://pcse.readthedocs.org
 """
 from __future__ import print_function
 __author__ = "Allard de Wit <allard.dewit@wur.nl>"
 __license__ = "European Union Public License"
-__version__ = "5.2.0"
-__stable__ = False
+__stable__ = True
+__version__ = "5.3.1"
 
 import sys, os
+from . import util
 
 # First define and run setup before importing the rest of the stuff
 def setup():
@@ -42,7 +42,7 @@ def setup():
     sys.path.
     """
 
-    user_home = os.path.expanduser("~")
+    user_home = util.get_user_home()
     pcse_user_home = os.path.join(user_home, ".pcse")
     if not os.path.exists(pcse_user_home):
         os.mkdir(pcse_user_home)
@@ -66,19 +66,16 @@ def setup():
                     cline = "# " + line
                 fp.write(cline)
 
-
 setup()
 
 import logging.config
 from .settings import settings
 logging.config.dictConfig(settings.LOG_CONFIG)
 
-# from . import examples
-from . import util
 from . import db
 from . import fileinput
 from . import tests
-from . import agromanagement
+from . import agromanager
 from . import soil
 from . import crop
 from .start_wofost import start_wofost
@@ -105,7 +102,3 @@ if not __stable__:
 def test(dsn=None):
     """Run all available tests for PCSE."""
     tests.test_all(dsn)
-
-
-
-

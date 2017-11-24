@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2004-2014 Alterra, Wageningen-UR
-# Allard de Wit (allard.dewit@wur.nl), April 2014
+# Allard de Wit (allard.dewit@wur.nl), June 2017
 
 import os, sys
 import matplotlib
@@ -11,35 +11,37 @@ import pcse
 from pcse.db import NASAPowerWeatherDataProvider
 from pcse.fileinput import CABOFileReader
 from pcse.fileinput import PCSEFileReader
+from pcse.fileinput import YAMLAgroManagementReader
 from pcse.models import Wofost71_WLP_FD
+from pcse.base_classes import ParameterProvider
 
 # First set the location where the crop, soil and crop calendar files can be found
 data_dir = r""
 if data_dir == "":
-    print "Variable 'data_dir' in line 16 must be set to the location of the the data folder"
-    return
+    print("Variable 'data_dir' in line 19 must be set to the location of the the data folder")
+    sys.exit()
 
 # Retrieve weather data from the NASA Power database
 wdp = NASAPowerWeatherDataProvider(latitude=52, longitude=5)
+
 # Read parameter values from the input files
 cropdata = CABOFileReader(os.path.join(data_dir,'sug0601.crop'))
 soildata = CABOFileReader(os.path.join(data_dir,'ec3.soil'))
-timerdata = PCSEFileReader(os.path.join(data_dir,'sugarbeet_calendar.pcse'))
 sitedata = {'SSMAX'  : 0.,
             'IFUNRN' : 0,
             'NOTINF' : 0,
             'SSI'    : 0,
             'WAV'    : 100,
-            'SMLIM'  : 0.03}
+            'SMLIM'  : 0.03,
+            'CO2'    : 360}
+parameters = ParameterProvider(cropdata=cropdata, soildata=soildata, sitedata=sitedata)
+
+# Read agromanagement
+agromanagement = YAMLAgroManagementReader(os.path.join(data_dir,'sugarbeet_calendar.amgt'))
 
 # Start WOFOST
-wf = Wofost71_WLP_FD(sitedata, timerdata, soildata, cropdata, wdp)
-wf.run(days=400)
-
-print wf.get_variable("DOA")
-print wf.get_variable("DOH")
-print wf.get_variable("TAGP")
-print wf.get_variable("LAIMAX")
+wf = Wofost71_WLP_FD(parameters, wdp, agromanagement)
+wf.run_till_terminate()
 
 # Get time-series output from WOFOST and take the selected variables
 output = wf.get_output()

@@ -1,30 +1,25 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2004-2014 Alterra, Wageningen-UR
-# Allard de Wit (allard.dewit@wur.nl), April 2014
+# Copyright (c) 2004-2016 Alterra, Wageningen-UR
+# Allard de Wit (allard.dewit@wur.nl), October 2016
 """Miscellaneous utilities for PCSE
 """
 import os, sys
 import datetime
 import copy
-from math import log10, cos, sin, asin, sqrt, exp
+import platform
+import tempfile
+import logging
+from math import log10, cos, sin, asin, sqrt, exp, pi, radians
 from collections import namedtuple
 from bisect import bisect_left
-try:
-    # support both python2 and python3
-    from collections import MutableMapping
-except ImportError:
-    from UserDict import DictMixin as MutableMapping
 import textwrap
 import sqlite3
-import pdb
-
-
-import numpy as np
 
 from . import exceptions as exc
 
 Celsius2Kelvin = lambda x: x + 273.16
 hPa2kPa = lambda x: x/10.
+
 # Saturated Vapour pressure [kPa] at temperature temp [C]
 SatVapourPressure = lambda temp: 0.6108 * exp((17.27 * temp) / (237.3 + temp))
 
@@ -300,7 +295,7 @@ def penman_monteith(DAY, LAT, ELEV, TMIN, TMAX, AVRAD, VAP, WIND2):
 
     return ET0
 
-#-------------------------------------------------------------------------------
+
 def check_angstromAB(xA, xB):
     """Routine checks validity of Angstrom coefficients.
     
@@ -388,15 +383,11 @@ def doy(day):
     """Converts a date or datetime object to day-of-year (Jan 1st = doy 1)
     """
     # Check if day is a date or datetime object
-    if isinstance(day, datetime.date):
-        pass
-    elif isinstance(day, datetime.datetime):
-        day = day.date()
+    if isinstance(day, (datetime.date, datetime.datetime)):
+        return day.timetuple().tm_yday
     else:
         msg = "Parameter day is not a date or datetime object."
         raise RuntimeError(msg)
-
-    return (day-datetime.date(day.year,1,1)).days + 1
 
 
 def limit(min, max, v):
@@ -444,26 +435,19 @@ def daylength(day, latitude, angle=-4, _cache={}):
         pass
     
     # constants
-    RAD = 0.0174533
-    PI = 3.1415926
-
-    # map python functions to capitals
-    SIN = sin
-    COS = cos
-    ASIN = asin
-    REAL = float
+    RAD = radians(1.)
 
     # calculate daylength
     ANGLE = angle
     LAT = latitude
-    DEC = -ASIN(SIN(23.45*RAD)*COS(2.*PI*(REAL(IDAY)+10.)/365.))
-    SINLD = SIN(RAD*LAT)*SIN(DEC)
-    COSLD = COS(RAD*LAT)*COS(DEC)
-    AOB   = (-SIN(ANGLE*RAD)+SINLD)/COSLD
+    DEC = -asin(sin(23.45*RAD)*cos(2.*pi*(float(IDAY)+10.)/365.))
+    SINLD = sin(RAD*LAT)*sin(DEC)
+    COSLD = cos(RAD*LAT)*cos(DEC)
+    AOB = (-sin(ANGLE*RAD)+SINLD)/COSLD
 
     # daylength
     if abs(AOB) <= 1.0:
-        DAYLP = 12.0*(1.+2.*ASIN((-SIN(ANGLE*RAD)+SINLD)/COSLD)/PI)
+        DAYLP = 12.0*(1.+2.*asin((-sin(ANGLE*RAD)+SINLD)/COSLD)/pi)
     elif AOB > 1.0:
         DAYLP = 24.0
     else:
@@ -526,26 +510,17 @@ def astro(day, latitude, radiation, _cache={}):
         pass
 
     # constants
-    RAD = 0.0174533
-    PI = 3.1415926
+    RAD = radians(1.)
     ANGLE = -4.
 
-    # map python functions to capitals
-    SIN = sin
-    COS = cos
-    ASIN = asin
-    REAL = float
-    SQRT = sqrt
-    ABS = abs
-
     # Declination and solar constant for this day
-    DEC = -ASIN(SIN(23.45*RAD)*COS(2.*PI*(REAL(IDAY)+10.)/365.))
-    SC  = 1370.*(1.+0.033*COS(2.*PI*REAL(IDAY)/365.))
+    DEC = -asin(sin(23.45*RAD)*cos(2.*pi*(float(IDAY)+10.)/365.))
+    SC  = 1370.*(1.+0.033*cos(2.*pi*float(IDAY)/365.))
 
     # calculation of daylength from intermediate variables
     # SINLD, COSLD and AOB
-    SINLD = SIN(RAD*LAT)*SIN(DEC)
-    COSLD = COS(RAD*LAT)*COS(DEC)
+    SINLD = sin(RAD*LAT)*sin(DEC)
+    COSLD = cos(RAD*LAT)*cos(DEC)
     AOB = SINLD/COSLD
 
     # For very high latitudes and days in summer and winter a limit is
@@ -554,11 +529,11 @@ def astro(day, latitude, radiation, _cache={}):
 
     # Calculate solution for base=0 degrees
     if abs(AOB) <= 1.0:
-        DAYL  = 12.0*(1.+2.*ASIN(AOB)/PI)
+        DAYL  = 12.0*(1.+2.*asin(AOB)/pi)
         # integrals of sine of solar height
-        DSINB  = 3600.*(DAYL*SINLD+24.*COSLD*SQRT(1.-AOB**2)/PI)
+        DSINB  = 3600.*(DAYL*SINLD+24.*COSLD*sqrt(1.-AOB**2)/pi)
         DSINBE = 3600.*(DAYL*(SINLD+0.4*(SINLD**2+COSLD**2*0.5))+
-                 12.*COSLD*(2.+3.*0.4*SINLD)*SQRT(1.-AOB**2)/PI)
+                 12.*COSLD*(2.+3.*0.4*SINLD)*sqrt(1.-AOB**2)/pi)
     else:
         if AOB >  1.0: DAYL = 24.0
         if AOB < -1.0: DAYL = 0.0
@@ -567,9 +542,9 @@ def astro(day, latitude, radiation, _cache={}):
         DSINBE = 3600.*(DAYL*(SINLD+0.4*(SINLD**2+COSLD**2*0.5)))
 
     # Calculate solution for base=-4 (ANGLE) degrees
-    AOB_CORR = (-SIN(ANGLE*RAD)+SINLD)/COSLD
+    AOB_CORR = (-sin(ANGLE*RAD)+SINLD)/COSLD
     if abs(AOB_CORR) <= 1.0:
-        DAYLP = 12.0*(1.+2.*ASIN(AOB_CORR)/PI)
+        DAYLP = 12.0*(1.+2.*asin(AOB_CORR)/pi)
     elif AOB_CORR > 1.0:
         DAYLP = 24.0
     elif AOB_CORR < -1.0:
@@ -603,7 +578,7 @@ def astro(day, latitude, radiation, _cache={}):
 
     return retvalue
 
-#-------------------------------------------------------------------------------
+
 class Afgen(object):
     """Emulates the AFGEN function in WOFOST.
     
@@ -692,104 +667,6 @@ class Afgen(object):
             v *= self.unit
 
         return v
-
-#-------------------------------------------------------------------------------
-class Afgen2(object):
-    """Emulates the AFGEN function in TTUTIL with Numpy.interp
-    
-    :param tbl_xy: List or array of XY value pairs describing the function
-        the X values should be mononically increasing.
-    :param unit: The interpolated values is returned with given
-        `unit <http://pypi.python.org/pypi/Unum/4.1.0>`_ assigned.
-    
-    Returns the interpolated value provided with the 
-    absicca value at which the interpolation should take place.
-    
-    example::
-    
-        >>> tbl_xy = [0,0,1,1,5,10]
-        >>> f =  Afgen(tbl_xy)
-        >>> f(0.5)
-        0.5
-        >>> f(1.5)
-        2.125
-        >>> f(5)
-        10.0
-        >>> f(6)
-        10.0
-        >>> f(-1)
-        0.0
-    """
-    
-    def __init__(self, tbl_xy, unit=None):
-    
-        x = tbl_xy[0::2]
-        y = tbl_xy[1::2]
-        
-        # Determine if there are empty pairs in tbl_xy by searching
-        # for the point where x stops monotonically increasing
-        xpos = np.arange(1, len(x))
-        ibreak = False
-        for i in xpos:
-            if x[i] <= x[i-1]:
-                ibreak = True
-                break
-        
-        if ibreak is True:
-            x = x[0:i]
-            y = y[0:i]
-        
-        self.x = x
-        self.y = y
-        self.unit = unit
-    
-    def __call__(self, p):
-        
-        v = np.interp(p, self.x, self.y)
-        
-        # if a unum unit is defined, multiply with a unit
-        if self.unit is not None:
-            v *= self.unit
-        return float(v)
-    
-    def __str__(self):
-        msg = "AFGEN interpolation over (X,Y) pairs:\n"
-        for (x,y) in zip(self.x, self.y):
-            msg += ("(%f,%f)\n " % (x,y))
-        msg += "\n"
-        if self.unit is not None:
-             msg += "Return value as unit: %s" % self.unit
-        return msg
-
-#-------------------------------------------------------------------------------
-class Chainmap(MutableMapping):
-    """Combine multiple mappings for sequential lookup.
-
-    For example, to emulate Python's normal lookup sequence:
-
-        import __builtin__
-        pylookup = Chainmap(locals(), globals(), vars(__builtin__))
-    
-    recipe taken from http://code.activestate.com/recipes/305268/
-    Available natively in the connections module in python 3.3
-    """
-
-    def __init__(self, *maps):
-        self._maps = maps
-
-    def __getitem__(self, key):
-        for mapping in self._maps:
-            try:
-                return mapping[key]
-            except KeyError:
-                pass
-        raise KeyError(key)
-        
-    def keys(self):
-        k = []
-        for mapping in self._maps:
-            return k.extend(mapping.keys)
-        return k
 
 
 def merge_dict(d1, d2, overwrite=False):
@@ -909,8 +786,8 @@ def is_a_month(day):
         if (day == datetime.date(day.year, day.month+1, 1) - \
                    datetime.timedelta(days=1)):
             return True
-
     return False
+
 
 def is_a_week(day, weekday=0):
     """Default weekday is Monday. Monday is 0 and Sunday is 6"""
@@ -938,8 +815,8 @@ def is_a_dekad(day):
         elif (day == datetime.date(day.year, day.month+1, 1) -
                      datetime.timedelta(days=1)):
             return True
-
     return False
+
 
 def load_SQLite_dump_file(dump_file_name, SQLite_db_name):
     """Build an SQLite database <SQLite_db_name> from dump file <dump_file_name>.
@@ -952,6 +829,7 @@ def load_SQLite_dump_file(dump_file_name, SQLite_db_name):
     con.executescript(str_sql_dump)
     con.close()
 
+
 def safe_float(x):
     """Returns the value of x converted to float, if fails return None.
     """
@@ -959,6 +837,7 @@ def safe_float(x):
         return float(x)
     except (ValueError, TypeError):
         return None
+
 
 def check_date(indate):
         """Check representations of date and try to force into a datetime.date
@@ -995,3 +874,123 @@ def check_date(indate):
         else:
             msg = "Input value not recognized as date: %s"
             raise KeyError(msg % indate)
+
+
+class DummySoilDataProvider(dict):
+    """This class is to provide some dummy soil parameters for potential production simulation.
+
+    Simulation of potential production levels is independent of the soil. Nevertheless, the model
+    does not some parameter values. This data provider provides some hard coded parameter values for
+    this situation.
+    """
+    _defaults = {"SMFCF":0.3,
+                 "SM0":0.4,
+                 "SMW":0.1,
+                 "RDMSOL":120,
+                 "CRAIRC":0.06,
+                 "K0":10.,
+                 "SOPE":10.,
+                 "KSUB":10.}
+
+    def __init__(self):
+        self.update(self._defaults)
+
+
+def version_tuple(v):
+    """Creates a version tuple from a version string for consistent comparison of versions.
+
+    Conversion to tuples is needed because version '2.12.9' is higher then '2.7.8' however::
+
+    >>> '2.12.9' > '2.7.8'
+    False
+
+    Instead we need:
+
+    >>> version_tuple('2.12.9') > version_tuple('2.7.8')
+    True
+    """
+    return tuple(map(int, (v.split("."))))
+
+
+class WOFOST71SiteDataProvider(dict):
+    """Site data provider for WOFOST 7.1.
+
+    Site specific parameters for WOFOST 7.1 can be provided through this data provider as well as through
+    a normal python dictionary. The sole purpose of implementing this data provider is that the site
+    parameters for WOFOST are documented, checked and that sensible default values are given.
+
+    The following site specific parameter values can be set through this data provider::
+
+        - IFUNRN    Indicates whether non-infiltrating fraction of rain is a function of storm size (1)
+                    or not (0). Default 0
+        - NOTINF    Maximum fraction of rain not-infiltrating into the soil [0-1], default 0.
+        - SSMAX     Maximum depth of water that can be stored on the soil surface [cm]
+        - SSI       Initial depth of water stored on the surface [cm]
+        - WAV       Initial amount of water in total soil profile [cm]
+        - SMLIM     Initial maximum moisture content in initial rooting depth zone [0-1], default 0.4
+        - CO2       Atmospheric CO2 level (ppm), default 360.
+    """
+    
+    _defaults = {"IFUNRN": (0, {0, 1}, int),
+                 "NOTINF": (0, [0., 1.], float),
+                 "SSI": (0., [0., 100.], float),
+                 "SSMAX": (0., [0., 100.], float),
+                 "WAV": (None, [0., 100.], float),
+                 "SMLIM": (0.4, [0., 1.], float),
+                 "CO2": (360., [300., 1400.], float)}
+    _required = ["WAV"]
+
+    def __init__(self, **kwargs):
+        dict.__init__(self)
+        
+        for par_name, (default_value, par_range, par_conversion) in self._defaults.items():
+            if par_name not in kwargs:
+                # parameter was not provided, use the default if possible
+                if par_name in self._required:
+                    msg = "Value for parameter '%s' must be provided!" % par_name
+                    raise exc.PCSEError(msg)
+                else:
+                    v = default_value
+            else:
+                # parameter was provided, check value for type and range
+                v = par_conversion(kwargs.pop(par_name))
+                if isinstance(par_range, set):
+                    if v not in par_range:
+                        msg = "Value for parameter '%s' can only have values: %s" % (par_name, par_range)
+                        raise exc.PCSEError(msg)
+                else:
+                    if not (par_range[0] <= v <= par_range[1]):
+                        msg = "Value for parameter '%s' out of range %s-%s" % \
+                              (par_name, par_range[0], par_range[1])
+                        raise exc.PCSEError(msg)
+            self[par_name] = v
+
+        # Check if kwargs is empty
+        if kwargs:
+            msg = "Unknown parameter values provided to WOFOSTSiteDataProvider: %s" % kwargs
+            print(msg)
+
+
+def get_user_home():
+    """A reasonable platform independent way to get the user home folder.
+    If PCSE runs under a system user then return the temp directory as returned
+    by tempfile.gettempdir()
+    """
+    user_home = None
+    if platform.system() == "Windows":
+        user = os.getenv("USERNAME")
+        if user is not None:
+            user_home = os.path.expanduser("~")
+    elif platform.system() == "Linux":
+        user = os.getenv("USER")
+        if user is not None:
+            user_home = os.path.expanduser("~")
+    else:
+        msg = "Platform not recognized, using system temp directory for PCSE settings."
+        logger = logging.getLogger("pcse")
+        logger.warning(msg)
+
+    if user_home is None:
+        user_home = tempfile.gettempdir()
+
+    return user_home

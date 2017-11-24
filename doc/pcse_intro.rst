@@ -45,7 +45,7 @@ Why Python
 PCSE was first and foremost developed from a scientific need, to be able to quickly adapt models and test ideas.
 In science, Python is quickly becoming a tool for implementing algorithms, visualization and explorative analysis
 due to its clear syntax and ease of use. An additional advantage is that the C implementation of Python
-can be easily interfaces with routines written in FORTRAN and therefore many FORTRAN routines can be reused by
+can be easily interfaced with routines written in FORTRAN and therefore many FORTRAN routines can be reused by
 simulation models written with PCSE.
 
 Many packages exist for numeric analysis (e.g. NumPy, SciPy),
@@ -81,8 +81,8 @@ PCSE also has its limitations, in fact there are several:
   time-step. Although the internal time-step of modules can be made more fine-grained if needed.
 
 * No graphical user interface. However the lack of a user interface is partly compensated by using PCSE with the
-  `pandas <http://pandas.pydata.org/>`_ package and the `IPython notebook <https://ipython.org/notebook.html>`_.
-  PCSE output can be easily converted to a pandas `DataFrame` which can be used to display charts in an IPython
+  `pandas <http://pandas.pydata.org/>`_ package and the `Jupyter notebook <https://jupyter.org/>`_.
+  PCSE output can be easily converted to a pandas `DataFrame` which can be used to display charts in an Jupyter
   notebook.
 
 License

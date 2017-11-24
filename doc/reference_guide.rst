@@ -49,15 +49,15 @@ in PCSE.
 
 .. _ContinuousSimulation:
 
-.. Continuous simulation in PCSE
-.. -----------------------------
+Continuous simulation in PCSE
+-----------------------------
 
 To implement continuous simulation, the engine uses the same approach as
 FSE: Euler integration with a fixed time step of one day.  The following
-figures shows the principle of continuous simulation
+figure shows the principle of continuous simulation
 and the execution order of various steps.
 
-.. figure:: continuous_simulation.png
+.. figure:: figures/continuous_simulation.png
    :align: center
    :width: 500 px
 
@@ -106,8 +106,12 @@ To start the Engine four inputs are needed:
    overview of the different options for providing weather data.
 2. A set of parameters that is needed to parameterize the SimulationObjects
    that simulate the soil and crop processes. Model parameters can be retrieved
-   from different sources like files or databases. The different sets of model
-   parameters (crop, soil and site) are encapsulated using a `ParameterProvider`
+   from different sources like files or databases. PCSE uses three sets of model
+   parameters: crop parameters, soil parameters and site parameters. The latter
+   present an ancillary set of parameters that are not related to the soil or
+   the crop. The atmospheric CO2 concentration is a typical example of a site
+   parameter. Despite having three sets of parameters, all parameters are
+   encapsulated using a `ParameterProvider`
    that provides a uniform interface to access the different parameter sets.
    See the section on `Data providers for parameter values`_ for an overview.
 3. Agromanagement information that is needed to schedule agromanagement
@@ -140,7 +144,7 @@ for potential crop production::
 
     from pcse.soil.classic_waterbalance import WaterbalancePP
     from pcse.crop.wofost import Wofost
-    from pcse.agromanagement import AgroManagementSingleCrop
+    from pcse.agromanager import AgroManager
 
     # Module to be used for water balance
     SOIL = WaterbalancePP
@@ -149,7 +153,7 @@ for potential crop production::
     CROP = Wofost
 
     # Module to use for AgroManagement actions
-    AGROMANAGEMENT = AgroManagementSingleCrop
+    AGROMANAGEMENT = AgroManager
 
     # variables to save at OUTPUT signals
     # Set to an empty list if you do not want any OUTPUT
@@ -164,11 +168,16 @@ for potential crop production::
     # Weekday: Monday is 0 and Sunday is 6
     OUTPUT_WEEKDAY = 0
 
-    # variables to save at SUMMARY_OUTPUT signals
+    # Summary variables to save at CROP_FINISH signals
     # Set to an empty list if you do not want any SUMMARY_OUTPUT
     SUMMARY_OUTPUT_VARS = ["DVS","LAIMAX","TAGP", "TWSO", "TWLV", "TWST",
                            "TWRT", "CTRAT", "RD", "DOS", "DOE", "DOA",
                            "DOM", "DOH", "DOV"]
+
+    # Summary variables to save at TERMINATE signals
+    # Set to an empty list if you do not want any TERMINAL_OUTPUT
+    TERMINAL_OUTPUT_VARS = []
+
 
 As you can see, the configuration file is written in plain python code.
 First of all, it defines the placeholders *SOIL*, *CROP* and
@@ -182,8 +191,17 @@ the modules that were imported at the start of the configuration file.
 The second part is for defining the
 variables (*OUTPUT_VARS*) that should be stored during the model run
 (during OUTPUT signals) and the details of the regular output interval.
-Finally, summary output can be defined that will be generated at the end
-of the simulation as a set of final outputs.
+Next, summary output *SUMMARY_OUTPUT_VARS* can be defined that will be generated at the end
+of each crop cycle. Finally, output can be collected at the end of the
+entire simulation (*TERMINAL_OUTPUT_VARS*).
+
+.. note::
+    Model configuration files for models that are included in the PCSE package
+    reside in the 'conf/' folder inside the package. When the Engine is started
+    with the name of a configuration file, it searches this folder to locate the file.
+    This implies that if you want the start the Engine with your own (modified)
+    configuration file, you *must* specify it as an absolute or relative path
+    otherwise the Engine will not find it.
 
 The relationship between models and the engine
 ----------------------------------------------
@@ -256,14 +274,14 @@ The skeleton of a SimulationObject looks like this:
             RATE1 = Float()
             # more rate variables defined here
 
-        def initialize(day, kiosk, parametervalues):
+        def initialize(self, day, kiosk, parametervalues):
             """Initializes the SimulationObject with given parametervalues."""
             self.params = self.Parameters(parametervalues)
             self.rates = self.RateVariables(kiosk)
             self.states = self.StateVariables(kiosk, STATE1=0., publish=["STATE1"])
 
         @prepare_rates
-        def calc_rates(day, drv):
+        def calc_rates(self, day, drv):
             """Calculate the rates of change given the current states and driving
             variables (drv)."""
 
@@ -271,14 +289,14 @@ The skeleton of a SimulationObject looks like this:
             self.rates.RATE1 = self.params.PAR1 * drv.RAIN
 
         @prepare_states
-        def integrate(day, delt):
+        def integrate(self, day, delt):
             """Integrate the rates of change on the current state variables
             multiplied by the time-step
             """
             self.states.STATE1 += self.rates.RATE1 * delt
 
         @prepare_states
-        def finalize(day):
+        def finalize(self, day):
             """do some final calculations when the simulation is finishing."""
 
 
@@ -292,8 +310,7 @@ states should be updated, subsequently all driving variables should be calculate
 after which all rates of change should be calculated. If this rule is not
 applied rigorously, some rates may pertain to states at
 the current time whereas others will pertain to states from the previous time
-step .
-Compared to the FSE system and the
+step. Compared to the FSE system and the
 `FORTRAN implementation of WOFOST <https://github.com/ajwdewit/wofost>`_,
 the `initialize()`, `calc_rates()`, `integrate()` and `finalize()` sections
 match with the *ITASK* numbers 1, 2, 3, 4.
@@ -321,8 +338,8 @@ Simulation Parameters
 Usually SimulationObjects have one or more parameters which should be defined as a subclass
 of the `ParamTemplate` class.  Although parameters can be specified as part
 of the SimulationObject definition directly, subclassing them from `ParamTemplate` has a few
-advantages. First of all parameters must be initialized and a missing parameter will lead to
-an exception being raised with a clear message. Second parameters are initialized as read-only
+advantages. First of all, parameters must be initialized and a missing parameter will lead to
+an exception being raised with a clear message. Secondly, parameters are initialized as read-only
 attributes which cannot be changed during the simulation. So occasionally overwriting a
 parameter value is impossible this way.
 
@@ -345,7 +362,7 @@ will be available in the VariableKiosk and can be retrieved by other components 
 name of the variables. The main difference between a rates and
 a states class is that the states class requires you to provide the initial value of the
 state as a keyword parameter in the call. Failing to provide the initial value will lead
-to an exception being raise.
+to an exception being raised.
 
 Instances of objects containing rate and state variables are read-only by default. In order
 to change the value of a rate or state, the instance must be unlocked. For this purpose
@@ -357,9 +374,12 @@ Similarly, state variables can only be changed during the state update while the
 of change are locked. This mechanism ensures that rate/state updates are carried out
 in the correct order.
 
-Finally, instances of rate variables have one additional method, called `zerofy()`.
+Finally, instances of RatesTemplate have one additional method, called `zerofy()` while
+instances of StatesTemplate have one additional method called `touch()`.
 Calling `zerofy()` is normally done by the Engine and explicitly sets all rates of change
-to zero.
+to zero. Calling `touch()` on a states object is only useful when the states variables
+do not need to be updated, but you do want to be sure that any published state variables
+will remain available in the VariableKiosk.
 
 
 The AgroManager
@@ -367,7 +387,7 @@ The AgroManager
 
 Agromanagement is an intricate part of PCSE which is needed for
 simulating the processes that are happening
-on agriculture fields. In order for crops to growth, farmers must first plow the
+on agriculture fields. In order for crops to grow, farmers must first plow the
 fields and sow the crop. Next, they have to do proper management including
 irrigation, weeding, nutrient application, pest control and finally harvesting.
 All these actions have to be scheduled at specific dates, connected to certain
@@ -375,11 +395,11 @@ crop stages or in dependence of soil and weather conditions. Moreover specific
 parameters such as the amount of irrigation or nutrients must be provided as well.
 
 In previous versions of WOFOST, the options for agromanagement were limited to
-sowing and harvesting. On the one had this was because agromangement was often assumed
+sowing and harvesting. On the one had this was because agromanagement was often assumed
 to be optimal and thus there was little need for detailed agromanagement.
 On the other hand, implementing agromanagement is relatively complex because
-agromanagement consists of events that are happening rather then
-continuous processes. As such, it does not fit well in the traditional simulation
+agromanagement consists of events that are happening once rather than
+continuously. As such, it does not fit well in the traditional simulation
 cycle, see :ref:`ContinuousSimulation`.
 
 Also from a technical point of view implementing such events through the traditional
@@ -393,7 +413,9 @@ or twice in the growing cycle. So for a 200-day growing cycle there will be
 198 days where the parameters do not carry any information. Nevertheless, they
 would still be present in the function call, thereby decreasing the computational
 efficiency and the readability of the code. Therefore, PCSE uses a very different
-approach for agromanagement events which is based on signals (see XXX).
+approach for agromanagement events which is based on signals (see :ref:`Broadcasting signals`).
+
+.. _refguide_agromanagement:
 
 Defining agromanagement in PCSE
 -------------------------------
@@ -432,7 +454,8 @@ An example of an agromanagement definition file::
     AgroManagement:
     - 1999-08-01:
         CropCalendar:
-            crop_id: winter-wheat
+            crop_name: wheat
+            variety_name: winter-wheat
             crop_start_date: 1999-09-15
             crop_start_type: sowing
             crop_end_date:
@@ -443,8 +466,8 @@ An example of an agromanagement definition file::
             name:  Timed irrigation events
             comment: All irrigation amounts in cm
             events_table:
-            - 2000-05-25: {irrigation_amount: 3.0}
-            - 2000-06-30: {irrigation_amount: 2.5}
+            - 2000-05-25: {amount: 3.0, efficiency=0.7}
+            - 2000-06-30: {amount: 2.5, efficiency=0.7}
         StateEvents:
         -   event_signal: apply_npk
             event_state: DVS
@@ -461,7 +484,8 @@ An example of an agromanagement definition file::
         StateEvents
     - 2001-03-01:
         CropCalendar:
-            crop_id: fodder-maize
+            crop_name: maize
+            variety_name: fodder-maize
             crop_start_date: 2001-04-15
             crop_start_type: sowing
             crop_end_date:
@@ -472,10 +496,10 @@ An example of an agromanagement definition file::
             name:  Timed irrigation events
             comment: All irrigation amounts in cm
             events_table:
-            - 2001-06-01: {irrigation_amount: 2.0}
-            - 2001-07-21: {irrigation_amount: 5.0}
-            - 2001-08-18: {irrigation_amount: 3.0}
-            - 2001-09-19: {irrigation_amount: 2.5}
+            - 2001-06-01: {amount: 2.0, efficiency=0.7}
+            - 2001-07-21: {amount: 5.0, efficiency=0.7}
+            - 2001-08-18: {amount: 3.0, efficiency=0.7}
+            - 2001-09-19: {amount: 2.5, efficiency=0.7}
         -   event_signal: apply_npk
             name:  Timed N/P/K application table
             comment: All fertilizer amounts in kg/ha
@@ -487,24 +511,24 @@ An example of an agromanagement definition file::
 Crop calendars
 --------------
 
-The crop calendar definition will be passed on to a `CropCalendar` object which is is
+The crop calendar definition will be passed on to a `CropCalendar` object which is 
 responsible for storing, checking, starting and ending the crop cycle during a PCSE simulation.
 At each time step the instance of `CropCalendar` is called
 and at the dates defined by its parameters it initiates the appropriate actions:
 
 - sowing/emergence: A `crop_start` signal is dispatched including the parameters needed to
-  start the new crop simulation object (crop_start_type and crop_id)
+  start the new crop simulation object (crop_name, variety_name, crop_start_type and crop_end_type)
 - maturity/harvest: the crop cycle is ended by dispatching a `crop_finish` signal with the
   appropriate parameters.
 
 For a detailed description of a crop calendar see the code documentation on the CropCalendar in the
-section on :ref:`Agromanagement`.
+section on :ref:`Agromanagement <AgromanagementCode>`.
 
 Timed events
 ------------
 
 Timed events are management actions that are occurring on specific dates. As simulations in PCSE run
-on daily time steps it is easy to schedule actions on dates. Time events are characterized by
+on daily time steps it is easy to schedule actions on dates. Timed events are characterized by
 an event signal, a name and comment that can be used to describe the event and finally an
 events table that lists the dates for the events and the parameters that should be passed onward.
 
@@ -512,7 +536,7 @@ Note that when multiple events are connected to the same date, the order in whic
 undetermined.
 
 For a detailed description of a timed events see the code documentation on the TimedEventsDispatcher
-in the section on :ref:`Agromanagement`.
+in the section on :ref:`Agromanagement <AgromanagementCode>`.
 
 
 State events
@@ -547,7 +571,7 @@ Note that when multiple events are connected to the same state value, the order 
 undetermined.
 
 For a detailed description of a state events see the code documentation on the StateEventsDispatcher
-in the section on :ref:`Agromanagement`.
+in the section on :ref:`Agromanagement <AgromanagementCode>`.
 
 
 Finding the start and end date of a simulation
@@ -563,11 +587,12 @@ The first option is to explicitly define the end date of the simulation by addin
 An example of an agromanagement definition with a 'trailing empty campaigns' (YAML format) is
 given below. This example will run the simulation until 2001-01-01::
 
-    Version: 1.0
+    Version: 1.0.0
     AgroManagement:
     - 1999-08-01:
         CropCalendar:
-            crop_id: winter-wheat
+            crop_name: wheat
+            variety_name: winter-wheat
             crop_start_date: 1999-09-15
             crop_start_type: sowing
             crop_end_date:
@@ -583,11 +608,12 @@ is retrieved from the crop calendar and/or the timed events that are scheduled. 
 end date will be 2000-08-05 as this is the harvest date and there are no timed events scheduled after this
 date::
 
-    Version: 1.0
+    Version: 1.0.0
     AgroManagement:
     - 1999-09-01:
         CropCalendar:
-            crop_id: winter-wheat
+            crop_name: wheat
+            variety_name: winter-wheat
             crop_start_date: 1999-10-01
             crop_start_type: sowing
             crop_end_date: 2000-08-05
@@ -598,9 +624,9 @@ date::
             name:  Timed irrigation events
             comment: All irrigation amounts in cm
             events_table:
-            - 2000-05-01: {irrigation_amount: 2, efficiency: 0.7}
-            - 2000-06-21: {irrigation_amount: 5, efficiency: 0.7}
-            - 2000-07-18: {irrigation_amount: 3, efficiency: 0.7}
+            - 2000-05-01: {amount: 2, efficiency: 0.7}
+            - 2000-06-21: {amount: 5, efficiency: 0.7}
+            - 2000-07-18: {amount: 3, efficiency: 0.7}
         StateEvents:
 
 In the case that there is no harvest date provided and the crop runs till maturity, the end date from
@@ -623,7 +649,7 @@ of the simulation. Therefore, this definition will lead to an error::
             name: irrigation scheduling on volumetric soil moisture content
             comment: all irrigation amounts in cm
             events_table:
-            - 0.25: {irrigation_amount: 2, efficiency: 0.7}
+            - 0.25: {amount: 2, efficiency: 0.7}
 
 Exchanging data between model components
 ========================================
@@ -651,7 +677,7 @@ of a single Engine. This uniqueness is enforced to avoid name conflicts between 
 would affect the publishing of variables or the retrieval of variables. For example,
 `engine.get_variable("LAI")` will retrieve the leaf area index of the crop. However, if there
 would be two variables named "LAI" it would be unclear which one is retrieved. It would not
-even be guaranteed that it is the same variables between function calls or model runs.
+even be guaranteed that it is the same variable between function calls or model runs.
 
 Second, the VariableKiosk takes care of exchanging state and rate variables between model
 components. Variables that are published by the RateVariables and StateVariables object will become
@@ -692,6 +718,8 @@ initializing rate/state variables, while retrieving values from the VariableKios
 through the normal dictionary look up. For more details on the VariableKiosk see the
 description in the :ref:`BaseClasses` section.
 
+.. _Broadcasting signals:
+
 Broadcasting signals
 --------------------
 
@@ -705,7 +733,7 @@ simulation, etc.
 Signals in PCSE are defined in the `signals` module which can be easily imported by
 any module that needs access to signals. Signals are simply defined as strings but
 any hashable object type would do. Most of the work for dealing with signals is in
-setting up a receiver. A receiver is usually a method on a SimulationObject that is
+setting up a receiver. A receiver is usually a method on a SimulationObject that 
 will be called when the signal is broadcasted. This method will then be connected
 to the signal during the initialization of the object. This is easy to describe
 with an example::
@@ -740,17 +768,367 @@ of its two arguments::
 Note that the methods for receiving signals `_connect_signal()` and sending signals `_send_signal()` are
 available because of subclassing `SimulationObject`. Both methods are highly flexible regarding the arguments and
 keyword arguments that can be passed on with the signal. For more details have a look at the documentation
-in the :ref:`Signals` module and the documentation of the `PyDispatcher <http://pydispatcher.sourceforge.net/>`_
+in the :ref:`Signals <Signals>` module and the documentation of the `PyDispatcher <http://pydispatcher.sourceforge.net/>`_
 package which is used to provide this functionality.
 
-Data Providers in PCSE
+
+
+Data providers in PCSE
 ======================
 
-Weather data providers
-----------------------
+PCSE needs to receive inputs on weather, parameter values and agromanagement in order to carry out the
+simulation. To obtain the required inputs several data providers have been written that read
+these inputs from a variety of sources. Nevertheless, care has been taken to avoid dependencies on a particular
+database and file format. As a consequence there is no direct coupling between PCSE and a particular file format
+or database. This ensures that a variety of data sources can be used, ranging from simple files, relational
+databases and internet resources.
 
-Data providers for parameter values
------------------------------------
+.. _Weather data providers:
+
+Weather data in PCSE
+--------------------
+
+Required weather variables
+..........................
+
+To run the crop simulation, the engine needs meteorological variables that
+drive the processes that are being simulated. PCSE requires the following daily
+meteorological variables:
+
+========= ========================================================= ===============
+Name        Description                                               Unit
+========= ========================================================= ===============
+TMAX      Daily maximum temperature                                  |C|
+TMIN      Daily minimum temperature                                  |C|
+VAP       Mean daily vapour pressure                                 |hPa|
+WIND      Mean daily wind speed at 2 m above ground level            |msec-1|
+RAIN      Precipitation (rainfall or water equivalent in case of
+          snow or hail).                                             |cmday-1|
+IRRAD     Daily global radiation                                     |Jm-2day-1|
+SNOWDEPTH Depth of snow cover (optional)                             |cm|
+========= ========================================================= ===============
+
+The snow depth is an optional meteorological variable and is only used for
+estimating the impact of frost damage on the crop (if enabled). Snow depth can
+also be simulated by the `SnowMAUS` module if observations are not available
+on a daily basis. Furthermore there are some meteorological variables which
+are derived from the previous ones:
+
+====== ========================================================= ===============
+Name   Description                                                 Unit
+====== ========================================================= ===============
+E0     Penman potential evaporation for a free water surface      |cmday-1|
+ES0    Penman potential evaporation for a bare soil surface       |cmday-1|
+ET0    Penman or Penman-Monteith potential evaporation
+       for a reference crop canopy                                |cmday-1|
+TEMP   Mean daily temperature (TMIN + TMAX)/2                     |C|
+DTEMP  Mean daytime temperature (TEMP + TMAX)/2                   |C|
+TMINRA The 7-day running average of TMIN                          |C|
+====== ========================================================= ===============
+
+
+How weather data is used in PCSE
+................................
+
+To provide the simulation Engine with weather data PCSE uses the concept of a
+`WeatherDataProvider` which can retrieve its weather data from various
+sources but provides a single interface to the Engine for retrieving the data.
+This principle can be most easily explained with an example based on
+weather data files provided in the Getting Started section
+:download:`downloads/quickstart_part3.zip`. In this example we will read the weather
+data from an Excel file `nl1.xlsx` using the ExcelWeatherDataProvider::
+
+    >>> import pcse
+    >>> from pcse.fileinput import ExcelWeatherDataProvider
+    >>> wdp = ExcelWeatherDataProvider('nl1.xlsx')
+
+We can simply `print()` the weather data provider to get an overview of its contents::
+
+    >>> print(wdp)
+    Weather data provided by: ExcelWeatherDataProvider
+    --------Description---------
+    Weather data for:
+    Country: Netherlands
+    Station: Wageningen, Location Haarweg
+    Description: Observed data from Station Haarweg in Wageningen
+    Source: Meteorology and Air Quality Group, Wageningen University
+    Contact: Peter Uithol
+    ----Site characteristics----
+    Elevation:    7.0
+    Latitude:  51.970
+    Longitude:  5.670
+    Data available for 2004-01-02 - 2008-12-31
+    Number of missing days: 32
+
+Moreover, we can call the weather dataproviders with a date object to retrieve a
+`WeatherDataContainer` for that date::
+
+    >>> from datetime import date
+    >>> day = date(2006,7,3)
+    >>> wdc = wdp(day)
+
+Again, we can print the WeatherDataContainer to reveal its contents::
+
+    >>> print(wdc)
+    Weather data for 2006-07-03 (DAY)
+    IRRAD:  29290000.00  J/m2/day
+     TMIN:        17.20   Celsius
+     TMAX:        29.60   Celsius
+      VAP:        12.80       hPa
+     RAIN:         0.00    cm/day
+       E0:         0.77    cm/day
+      ES0:         0.69    cm/day
+      ET0:         0.72    cm/day
+     WIND:         2.90     m/sec
+    Latitude  (LAT):    51.97 degr.
+    Longitude (LON):     5.67 degr.
+    Elevation (ELEV):    7.0 m.
+
+While individual weather elements can be accessed through the standard dotted python notation::
+
+    >>> print(wdc.TMAX)
+    29.6
+
+Finally, for convenience the WeatherDataProvider can also be called with a string representing a date.
+This string can in the format YYYYMMDD or YYYYDDD::
+
+    >>> print wdp("20060703")
+    Weather data for 2006-07-03 (DAY)
+    IRRAD:  29290000.00  J/m2/day
+     TMIN:        17.20   Celsius
+     TMAX:        29.60   Celsius
+      VAP:        12.80       hPa
+     RAIN:         0.00    cm/day
+       E0:         0.77    cm/day
+      ES0:         0.69    cm/day
+      ET0:         0.72    cm/day
+     WIND:         2.90     m/sec
+    Latitude  (LAT):    51.97 degr.
+    Longitude (LON):     5.67 degr.
+    Elevation (ELEV):    7.0 m.
+
+or in the format YYYYDDD::
+
+    >>> print wdp("2006183")
+    Weather data for 2006-07-03 (DAY)
+    IRRAD:  29290000.00  J/m2/day
+     TMIN:        17.20   Celsius
+     TMAX:        29.60   Celsius
+      VAP:        12.80       hPa
+     RAIN:         0.00    cm/day
+       E0:         0.77    cm/day
+      ES0:         0.69    cm/day
+      ET0:         0.72    cm/day
+     WIND:         2.90     m/sec
+    Latitude  (LAT):    51.97 degr.
+    Longitude (LON):     5.67 degr.
+    Elevation (ELEV):    7.0 m.
+
+
+Weather data providers available in PCSE
+........................................
+
+PCSE provides several weather data providers out of the box. First of all, it includes file-based weather data providers
+that use an input file on disk to retrieve data. The :ref:`CABOWeatherDataProvider <CABOWeatherDataProvider>` and
+the :ref:`ExcelWeatherDataProvider <ExcelWeatherDataProvider>` use the structure as defined by the
+`CABO Weather System`_. The ExcelWeatherDataProvider has the advantage that data can be stored in an Excel file
+which is easier to handle than the ASCII files of the CABOWeatherDataProvider. Furthermore, a weather data provider
+is available that uses a simple CSV data format, :ref:`CSVWeatherDataProvider <CSVWeatherDataProvider>`.
+
+Second, there is a set of WeatherDataProviders that derive the weather data from the database tables
+implemented in the different versions of the `European Crop Growth Monitoring System`_ including a
+:ref:`CGMS8 <CGMS8tools>` database, a :ref:`CGMS12 <CGMS12tools>` database and
+a :ref:`CGMS14 <CGMS14tools>` database.
+
+Finally, there is the global weather data provided by the agroclimatology from the
+`NASA Power database`_ at a resolution of 1x1 degree. PCSE provides the
+:ref:`NASAPowerWeatherDataProvider <NASAPowerWeatherDataProvider>` which retrieves
+the NASA Power data from the internet for a given latitude and longitude.
+
+.. _CABO Weather System: http://edepot.wur.nl/43010
+.. _NASA Power database: http://power.larc.nasa.gov
+.. _European Crop Growth Monitoring System: http://marswiki.jrc.ec.europa.eu/agri4castwiki/index.php/Weather_Monitoring
+
+
+.. _Data providers for parameter values:
+
+Data providers for crop parameter values
+----------------------------------------
+
+PCSE has a specific data provider for crop parameters: the YAMLCropDataprovider.
+The difference with the generic data providers is that
+this data provider can read and store the parameter sets for multiple
+crops while the generic data providers only can hold a single set.
+This crop data providers is therefore suitable
+for running crop rotations with different crop types as the data provider
+can switch the active crop.
+
+The most basic use is to call YAMLCropDataProvider with no parameters. It will
+than pull the crop parameters from the github repository at
+https://github.com/ajwdewit/WOFOST_crop_parameters::
+
+    >>> from pcse.fileinput import YAMLCropDataProvider
+    >>> p = YAMLCropDataProvider()
+    >>> print(p)
+    YAMLCropDataProvider - crop and variety not set: no activate crop parameter set!
+
+All crops and varieties have been loaded from the YAML file, however no activate
+crop has been set. Therefore, we need to activate a a particular crop and variety:
+
+    >>> p.set_active_crop('wheat', 'Winter_wheat_101')
+    >>> print(p)
+    YAMLCropDataProvider - current active crop 'wheat' with variety 'Winter_wheat_101'
+    Available crop parameters:
+     {'DTSMTB': [0.0, 0.0, 30.0, 30.0, 45.0, 30.0], 'NLAI_NPK': 1.0, 'NRESIDLV': 0.004,
+     'KCRIT_FR': 1.0, 'RDRLV_NPK': 0.05, 'TCPT': 10, 'DEPNR': 4.5, 'KMAXRT_FR': 0.5,
+     ...
+     ...
+     'TSUM2': 1194, 'TSUM1': 543, 'TSUMEM': 120}
+
+Additionally, it is possible to load YAML parameter files from your local file system::
+
+    >>> p = YAMLCropDataProvider(fpath=r"D:\UserData\sources\WOFOST_crop_parameters")
+    >>> print(p)
+    YAMLCropDataProvider - crop and variety not set: no activate crop parameter set!
+
+Finally, it is possible to pull data from your fork of my github repository by specifying
+the URL to that repository::
+
+    >>> p = YAMLCropDataProvider(repository="https://raw.githubusercontent.com/<your_account>/WOFOST_crop_parameters/master/")
+
+To increase performance of loading parameters, the YAMLCropDataProvider will create a
+cache file that can be restored much quicker compared to loading the YAML files.
+When reading YAML files from the local file system, care is taken to ensure that the
+cache file is re-created when updates to the local YAML are made. However, it should
+be stressed that this is *not* possible when parameters are retrieved from a URL
+and there is a risk that parameters are loaded from an outdated cache file. In that
+case use `force_reload=True` to force loading the parameters from the URL.
+
+
+Generic data providers for parameters
+-------------------------------------
+
+PCSE provides several modules for retrieving parameter values for use in simulation models.
+The general concept that is used by all data providers for parameters is that they return a
+python dictionary object with the parameter names and values as key/value pairs. This concept
+is independent of the source where the parameters come from, either a file, a relational database or
+an internet source. It also means that parameters can be easily defined or changed on the command prompt,
+which is useful when iterating over loops and changing parameter files at each iteration.
+For example when showing the impact of a change in a crop parameter one could easily do::
+
+    >>> from pcse.fileinput import CABOFileReader
+    >>> import numpy as np
+    >>> cropfile = os.path.join(data_dir, 'sug0601.crop')
+    >>> cropdata = CABOFileReader(cropfile)
+    >>> TSUM1_values = np.arange(800, 1200, 25)
+    >>> for tsum1 in TSUM1_values:
+            cropdata["TSUM1"] = tsum1
+            # code needed to run the simulation goes here
+
+
+PCSE provides two file-based data providers for reading parameters. The first one is the
+:ref:`CABOFileReader <CABOFileReader>` which reads parameter file in the CABO format that was
+used to write parameter files for models in FORTRAN or FST. A more versatile reader is the
+:ref:`PCSEFileReader <PCSEFileReader>` which uses the python language itself as its syntax.
+This also implies that all the python syntax features can be used in PCSE parameter files.
+
+Finally, several data providers exist for retrieving crop, soil and site parameter values from the database
+of the Crop Growth Monitoring System including data providers for a
+:ref:`CGMS8 <CGMS8tools>` database,
+a :ref:`CGMS12 <CGMS12tools>` database and a :ref:`CGMS14 <CGMS14tools>`
+database.
+
+As described earlier, PCSE needs parameters to define the soil, the crop and and additional
+ancillary class of parameters called 'site'. Nevertheless, the different modules in PCSE have
+different needs, some need access to crop parameters only, but some need to combine parameter
+values from different sets. For example, the root dynamics module computes
+the maximum root depth as the minimum of the crop maximum root depth (a crop parameter)
+and the soil maximum root depth (a soil parameter).
+
+The facilitate accessing different parameters from different parameter sets, all parameters
+are combined using a `ParameterProvider` object which provides unified access to all
+available parameters. Moreover, parameters from different sources can be easily combined
+in the ParameterProvider given that each parameter set uses the basic key/value pair principles
+for accessing names and values::
+
+    >>> import os
+    >>> import sqlalchemy as sa
+    >>> from pcse.fileinput import CABOFileReader, PCSEFileReader
+    >>> from pcse.base_classes import ParameterProvider
+    >>> from pcse.db.pcse import fetch_sitedata
+    >>> import pcse.settings
+
+    # Retrieve crop data from a CABO file
+    >>> cropfile = os.path.join(data_dir, 'sug0601.crop')
+    >>> crop = CABOFileReader(cropfile)
+
+    # Retrieve soildata from a PCSE file
+    >>> soilfile = os.path.join(data_dir, 'lintul3_springwheat.soil')
+    >>> soil = PCSEFileReader(soilfile)
+
+    # Retrieve site data from the PCSE demo DB
+    >>> db_location = os.path.join(pcse.settings.PCSE_USER_HOME, "pcse.db")
+    >>> db_engine = sa.create_engine("sqlite:///" + db_location)
+    >>> db_metadata = sa.MetaData(db_engine)
+    >>> site = fetch_sitedata(db_metadata, grid=31031, year=2000)
+
+    # Combine everything into one ParameterProvider object and print some values
+    >>> parprov = ParameterProvider(sitedata=site, soildata=soil, cropdata=crop)
+    >>> print(parprov["AMAXTB"]) # maximum leaf assimilation rate
+    [0.0, 22.5, 1.0, 45.0, 1.13, 45.0, 1.8, 36.0, 2.0, 36.0]
+    >>> print(parprov["DRATE"])  # maximum soil drainage rate
+    30.0
+    >>> print(parprov["WAV"])  # site-specific initial soil water amount
+    10.0
+
+
+.. _Data providers for agromanagement:
 
 Data providers for agromanagement
 ---------------------------------
+
+Similar to weather and parameter values, there are several data providers for agromanagement.
+The structure of the inputs for agromanagement is more complex compared to parameter values or weather
+variables.
+
+The most comprehensive way to define agromanagement in PCSE is to use the YAML structure that was
+described in the section above on  :ref:`defining agromanagement <refguide_agromanagement>`. For reading
+this datastructure the :ref:`YAMLAgroManagementReader <YAMLAgroManagementReader>` module is available
+which can be provided directly as input into the Engine.
+
+For reading Agromanagement input from a CGMS database see the sections on the database tools for
+a :ref:`CGMS8 <CGMS8tools>` database, a :ref:`CGMS12 <CGMS12tools>` database and
+a :ref:`CGMS14 <CGMS14tools>` database. Note that the support for defining agromanagement
+in CGMS databases is limited to crop calendars only. The CGMS database has no support for defining state and
+timed events yet.
+
+
+Global PCSE settings
+====================
+
+PCSE has a number of settings that define some global PCSE behaviour. An example of a global setting is
+the PCSE_USER_HOME variable which is used to define the home folder of the user.
+The settings are stored in two files: 1) `default_settings.py` which can be found in the PCSE installation
+folder under `settings/` and should not be changed. 2) `user_settings.py` which can be found in the `.pcse`
+folder in the user home directory. Under Windows this is typically `c:\\users\\<username>\\.pcse` while
+under Linux systems this is typically '/home/<username>/.pcse'.
+
+Changing the PCSE global settings can be done by editing the file `user_settings.py`, uncommenting the
+entries that should be changed and changing its value. Note that dependencies in the configuration file
+should be respected as the default settings and user settings are parsed separately.
+
+Adding PCSE global settings can be done by adding new entries to the `user_settings.py` file. Note that
+settings should be defined as ALL_CAPS. Variable names in the settings file that start with '_' will be
+ignored, while any other variable names will generate a warning and be neglected.
+
+If the user settings file is corrupted and PCSE fails to start, then the best option is to delete the
+`user_settings.py` file from the `.pcse` folder in the user home directory. The next time PCSE starts,
+the `user_settings.py` will be regenerated from the default settings with all settings commented out.
+
+Within PCSE all settings can be easily accessed by importing the settings module::
+
+    >>> import pcse.settings
+    >>> pcse.settings.PCSE_USER_HOME
+    'C:\\Users\\wit015\\.pcse'
+    >>> pcse.settings.METEO_CACHE_DIR
+    'C:\\Users\\wit015\\.pcse\\meteo_cache'

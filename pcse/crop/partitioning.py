@@ -134,7 +134,7 @@ class DVS_Partitioning(SimulationObject):
 #             raise exc.PartitioningError(msg)
 
     @prepare_states
-    def integrate(self, day):
+    def integrate(self, day, delt=1.0):
         """Update partitioning factors based on development stage (DVS)"""
 
         params = self.params
@@ -246,7 +246,7 @@ class DVS_Partitioning_NPK(SimulationObject):
     def initialize(self, day, kiosk, cropdata):
         """
         :param day: start date of the simulation
-        :param kiosk: variable kiosk of this PyWOFOST instance
+        :param kiosk: variable kiosk of this PCSE instance
         :param cropdata: dictionary with WOFOST cropdata key/value pairs
         """
         self.params = self.Parameters(cropdata)
@@ -283,7 +283,7 @@ class DVS_Partitioning_NPK(SimulationObject):
             raise exc.PartitioningError(msg)
 
     @prepare_states
-    def integrate(self, day):
+    def integrate(self, day, delt=1.0):
         """
         Update partitioning factors based on development stage (DVS)
         and the Nitrogen nutrition Index (NNI)

@@ -253,7 +253,7 @@ class WOFOST_Leaf_Dynamics(SimulationObject):
                 rates.SLAT = GLA/rates.GRLV
 
     @prepare_states
-    def integrate(self, day):
+    def integrate(self, day, delt=1.0):
         params = self.params
         rates = self.rates
         states = self.states
@@ -420,7 +420,7 @@ class CSDM_Leaf_Dynamics(SimulationObject):
         pass
 
     @prepare_states
-    def integrate(self, day):
+    def integrate(self, day, delt=1.0):
 
         self.states.DAYNR += 1
         self.states.LAI = self._CSDM(self.states.DAYNR)
@@ -583,7 +583,7 @@ class WOFOST_Leaf_Dynamics_NPK(SimulationObject):
     def initialize(self, day, kiosk, cropdata):
         """
         :param day: start date of the simulation
-        :param kiosk: variable kiosk of this PyWOFOST instance
+        :param kiosk: variable kiosk of this PCSE instance
         :param cropdata: dictionary with WOFOST cropdata key/value pairs
         """
 
@@ -707,7 +707,7 @@ class WOFOST_Leaf_Dynamics_NPK(SimulationObject):
                 rates.SLAT = GLA/rates.GRLV
 
     @prepare_states
-    def integrate(self, day):
+    def integrate(self, day, delt=1.0):
         params = self.params
         rates = self.rates
         states = self.states
